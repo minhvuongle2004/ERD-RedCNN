@@ -35,6 +35,9 @@ def make_parser():
         "--dryrun", action="store_true", help="Deactivate syncing to Weights & Biases"
     )
     parser.add_argument("--wandbtag", default="", help="W&B Tag (default = no tag)")
+    parser.add_argument(
+        "--resume", default="", help="Path to checkpoint .pt file to resume training from"
+    )
     # --------------------------------   Training   --------------------------------#
     parser.add_argument(
         "--max_iterations", type=int, help="Maximum number of iterations to train"

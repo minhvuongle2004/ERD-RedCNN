@@ -175,7 +175,19 @@ class BaseTrainer(object):
         - log kết quả
         cho tới khi đạt max_iterations.
         """
-        delta_seed = 0
+        # Resume from checkpoint nếu được chỉ định
+        if hasattr(self.args, "resume") and self.args.resume and os.path.exists(self.args.resume):
+            print(f"Resuming from checkpoint: {self.args.resume}")
+            checkpoint = torch.load(self.args.resume, map_location=self.dev)
+            state_dict = checkpoint["model_state_dict"]
+            if isinstance(self.args.devices, list):
+                self.model.module.load_state_dict(state_dict)
+            else:
+                self.model.load_state_dict(state_dict)
+            self.iteration = checkpoint["iteration"]
+            print(f"✅ Resumed at iteration {self.iteration}, continuing to {self.args.max_iterations}")
+
+        delta_seed = self.iteration // self.args.iterations_before_val
         while self.iteration < self.args.max_iterations:
             torch.manual_seed(self.args.seed + delta_seed)
             np.random.seed(self.args.seed + delta_seed)
