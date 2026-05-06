@@ -166,7 +166,7 @@ class LDCTMayo(Dataset):
         str
             Filename
         """
-        return "1-{}.dcm".format(str(idx).zfill(len(str(n_slices))))
+        return "{}.dcm".format(str(idx).zfill(8))
 
     def _random_crop(self, images: List[np.ndarray]) -> List[np.ndarray]:
         """Randomly crop the same patch from images (e.g. ground truth and input)
@@ -281,7 +281,7 @@ class TestData(Dataset):
             return X + 1024.0
 
     def _idx2filename(self, idx, n_slices):
-        return "1-{}.dcm".format(str(idx).zfill(len(str(n_slices))))
+        return "{}.dcm".format(str(idx).zfill(8))
 
     def to_torch(self, X):
         return torch.from_numpy(X)
