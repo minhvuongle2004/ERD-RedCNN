@@ -3,6 +3,7 @@ adam_b2: 0.999
 cuda: true
 data_norm: meanstd
 data_subset: 1.0
+datafolder: data
 devices: 0
 dryrun: true
 iterations_before_val: 1000

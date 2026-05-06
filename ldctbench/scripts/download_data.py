@@ -41,7 +41,7 @@ def get_token(user, pwd):
         access_token = data.json()["access_token"]
         api_call_headers = {"Authorization": "Bearer " + access_token}
         
-        print(f"✓ Authentication successful! Token obtained.")
+        print(f"[OK] Authentication successful! Token obtained.")
 
     # handle errors
     except requests.exceptions.HTTPError as errh:
@@ -227,7 +227,7 @@ def main():
         # Update manifest file
         new_series_count = len(metadata_df) - initial_rows
         print("\n" + "=" * 60)
-        print(f"✓ Successfully downloaded {new_series_count} new series!")
+        print(f"[OK] Successfully downloaded {new_series_count} new series!")
         print("=" * 60)
         print(f"Success rate: {new_series_count}/{len(series_to_download)} ({100*new_series_count/len(series_to_download):.1f}%)")
         if failed_series:

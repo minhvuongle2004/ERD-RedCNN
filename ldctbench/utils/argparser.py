@@ -7,6 +7,7 @@ METHODS = [
     "bilateral",
     "cnn10",
     "dugan",
+    "edrrednet",
     "qae",
     "redcnn",
     "resnet",
@@ -108,7 +109,12 @@ def make_parser():
 
 def use_config(args):
     if args.config:
-        file = open(args.config)
-        parsed_yaml = yaml.load(file, Loader=yaml.FullLoader)
-        args = argparse.Namespace(**parsed_yaml)
+        with open(args.config, encoding="utf-8") as file:
+            parsed_yaml = yaml.load(file, Loader=yaml.FullLoader)
+        # Merge: start with CLI args, then update with yaml values.
+        # yaml takes precedence over CLI defaults.
+        # Any CLI flag not in yaml (e.g. --dryrun) is preserved.
+        args_dict = vars(args)
+        args_dict.update(parsed_yaml)
+        args = argparse.Namespace(**args_dict)
     return args
