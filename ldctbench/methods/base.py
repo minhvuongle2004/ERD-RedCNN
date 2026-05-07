@@ -178,7 +178,7 @@ class BaseTrainer(object):
         # Resume from checkpoint nếu được chỉ định
         if hasattr(self.args, "resume") and self.args.resume and os.path.exists(self.args.resume):
             print(f"Resuming from checkpoint: {self.args.resume}")
-            checkpoint = torch.load(self.args.resume, map_location=self.dev)
+            checkpoint = torch.load(self.args.resume, map_location=self.dev, weights_only=False)
             state_dict = checkpoint["model_state_dict"]
             if isinstance(self.args.devices, list):
                 self.model.module.load_state_dict(state_dict)
