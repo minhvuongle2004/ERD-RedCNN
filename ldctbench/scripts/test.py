@@ -108,6 +108,7 @@ def main():
     }
 
     # Setup LDCTIQA if in metrics
+    ldct_iqa = None
     if "LDCTIQA" in args.metrics:
         from ldctbench.evaluate.ldct_iqa import LDCTIQA
 

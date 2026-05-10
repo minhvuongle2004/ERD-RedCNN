@@ -1,335 +1,196 @@
-import streamlit as st
+import os
+import sys
+import shutil
+import yaml
 import torch
 import numpy as np
-import pydicom
-import os
-import tempfile
-from PIL import Image, ImageDraw
+import streamlit as st
+import matplotlib.pyplot as plt
+from scipy.ndimage import sobel
+
+st.set_page_config(page_title="EDR-REDNet Visualizer", layout="wide")
+
+# ==========================================
+# 1. SETUP ENVIRONMENT & PATCHES
+# ==========================================
+# Sửa lỗi weights_only=True trên PyTorch 2.6
+original_load = torch.load
+def safe_load(*args, **kwargs):
+    kwargs['weights_only'] = False
+    return original_load(*args, **kwargs)
+torch.load = safe_load
+
+# Sửa lỗi Unicode trên Windows khi đọc file YAML
+def safe_load_yaml(path: str):
+    with open(path, encoding='utf-8') as file:
+        return yaml.load(file, Loader=yaml.FullLoader)
+
+import ldctbench.evaluate.utils
+import ldctbench.utils
+ldctbench.evaluate.utils.torch.load = safe_load
+ldctbench.evaluate.utils.load_yaml = safe_load_yaml
+ldctbench.utils.load_yaml = safe_load_yaml
+
+from ldctbench.data import TestData
+from ldctbench.evaluate import setup_trained_model
 from ldctbench.hub import load_model
-import tkinter as tk
-from tkinter import filedialog
-from skimage import io as skio
 
-# ============================================================================
-# CẤU HÌNH VÀ HẰNG SỐ
-# ============================================================================
-st.set_page_config(page_title="LDCT Denoising App", layout="wide")
-
-MEAN = 481.45419786099086
-STD = 502.18507379395044
-
-# ============================================================================
-# CÁC HÀM HỖ TRỢ (Tái sử dụng từ script cũ)
-# ============================================================================
-def normalize(image):
-    return (image - MEAN) / STD
-
-def denormalize(image):
-    return (image * STD) + MEAN
-
-def to_uint8(image):
-    min_val = np.min(image)
-    max_val = np.max(image)
-    if max_val > min_val:
-        scaled = (image - min_val) / (max_val - min_val)
-    else:
-        scaled = np.zeros_like(image)
-    return (scaled * 255).astype(np.uint8)
-
-def load_image(file_path_or_obj, is_file_obj=False):
-    """Load ảnh từ nhiều định dạng: DICOM, PNG, JPG, TIFF"""
-    try:
-        if is_file_obj:
-            # Xử lý file upload từ Streamlit
-            file_ext = os.path.splitext(file_path_or_obj.name)[1].lower()
-        else:
-            # Xử lý file từ đường dẫn
-            file_ext = os.path.splitext(file_path_or_obj)[1].lower()
-        
-        # DICOM files
-        if file_ext in ['.dcm', '.dicom']:
-            if is_file_obj:
-                dcm = pydicom.dcmread(file_path_or_obj, force=True)
-            else:
-                dcm = pydicom.dcmread(file_path_or_obj, force=True)
-            image = dcm.pixel_array.astype(np.float32)
-            if image.ndim > 2:
-                image = image[0]
-            return image
-        
-        # TIFF files (có thể là 16-bit hoặc float)
-        elif file_ext in ['.tiff', '.tif']:
-            if is_file_obj:
-                # Lưu file tạm để đọc
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.tiff') as tmp:
-                    tmp.write(file_path_or_obj.read())
-                    tmp_path = tmp.name
-                image = skio.imread(tmp_path).astype(np.float32)
-                os.unlink(tmp_path)
-            else:
-                image = skio.imread(file_path_or_obj).astype(np.float32)
-            # Nếu là ảnh grayscale, đảm bảo là 2D
-            if image.ndim > 2:
-                image = image[:, :, 0] if image.shape[2] == 1 else np.mean(image, axis=2)
-            return image
-        
-        # PNG, JPG, JPEG files
-        elif file_ext in ['.png', '.jpg', '.jpeg']:
-            if is_file_obj:
-                img = Image.open(file_path_or_obj)
-            else:
-                img = Image.open(file_path_or_obj)
-            
-            # Chuyển sang grayscale nếu là RGB
-            if img.mode != 'L':
-                img = img.convert('L')
-            
-            image = np.array(img).astype(np.float32)
-            return image
-        
-        else:
-            raise ValueError(f"Định dạng không được hỗ trợ: {file_ext}")
+# ==========================================
+# 2. SETUP CACHING & MODELS
+# ==========================================
+@st.cache_resource
+def setup_environment():
+    """Tạo thư mục ảo để ldctbench load được model custom"""
+    checkpoint_path = r"results\training\seed2024\seed2024_best_SSIM.pt"
+    fake_run_dir = r"wandb\edr_redcnn_seed2024\files"
+    os.makedirs(fake_run_dir, exist_ok=True)
     
-    except Exception as e:
-        raise ValueError(f"Không thể đọc file: {e}")
+    if os.path.exists(checkpoint_path):
+        shutil.copy(r"configs\edrrednet.yaml", os.path.join(fake_run_dir, "args.yaml"))
+        shutil.copy(checkpoint_path, os.path.join(fake_run_dir, "best_SSIM.pt"))
+    return checkpoint_path
 
 @st.cache_resource
-def get_model(model_name):
-    """Load model và cache lại để không phải load lại mỗi lần thao tác"""
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = load_model(model_name, eval=True).to(device)
-    return model, device
+def load_dataset():
+    """Tải Dataset Test"""
+    # Dùng data folder local (data)
+    return TestData("data", "meanstd")
 
-# ============================================================================
-# GIAO DIỆN CHÍNH
-# ============================================================================
-def main():
-    st.title("🏥 Ứng dụng Khử nhiễu ảnh CT (LDCT Denoising)")
-
-    # --- Sidebar: Cấu hình ---
-    st.sidebar.header("⚙️ Cấu hình")
-    model_name = st.sidebar.selectbox(
-        "Chọn mô hình", 
-        ["redcnn", "cnn10", "wganvgg", "resnet", "qae", "dugan", "transct", "bilateral"], 
-        index=0
+@st.cache_resource
+def load_networks():
+    """Tải các mô hình vào VRAM"""
+    dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    networks = {}
+    # RED-CNN (Baseline)
+    networks["redcnn"] = load_model("redcnn", eval=True).to(dev)
+    # EDR-REDNet (Ours)
+    net = setup_trained_model(
+        run_name="edr_redcnn_seed2024",
+        device=dev,
+        network_name="Model",
+        state_dict="best_SSIM",
+        eval=True,
     )
+    networks["edr_redcnn"] = net
+    return networks, dev
+
+# Khởi tạo
+ckpt_path = setup_environment()
+if not os.path.exists(ckpt_path):
+    st.error(f"❌ Không tìm thấy file trọng số tại {ckpt_path}. Vui lòng kiểm tra lại.")
+    st.stop()
+
+dataset = load_dataset()
+networks, device = load_networks()
+
+# ==========================================
+# 3. STREAMLIT UI
+# ==========================================
+st.title("🔬 EDR-REDNet: Interactive Evaluation")
+st.markdown("Trình diễn khả năng khử nhiễu ảnh CT Liều Thấp (LDCT) bằng kiến trúc EDR-REDNet.")
+
+# Sidebar Controls
+st.sidebar.header("🕹️ Điều khiển")
+patient_names = [p["info"]["id"] for p in dataset.samples]
+selected_patient_idx = st.sidebar.selectbox("1. Chọn Bệnh nhân (Patient ID)", range(len(patient_names)), format_func=lambda i: patient_names[i])
+
+patient_data = dataset[selected_patient_idx]
+n_slices = patient_data["info"]["n_slices"]
+
+selected_slice = st.sidebar.slider("2. Chọn Lát cắt (Slice)", 0, n_slices - 1, int(n_slices/2))
+
+show_diff = st.sidebar.checkbox("🔍 Hiển thị Bản đồ Lỗi (Difference Map)", value=False)
+show_edge = st.sidebar.checkbox("📐 Hiển thị Bản đồ Biên (Sobel Edge Map)", value=False)
+st.sidebar.markdown("---")
+st.sidebar.markdown("**HU Windowing**")
+hu_min = st.sidebar.slider("Min HU", -1024, 1024, -1000)
+hu_max = st.sidebar.slider("Max HU", -1024, 3000, 1000)
+
+# ==========================================
+# 4. INFERENCE & PROCESSING
+# ==========================================
+with st.spinner("Đang chạy Inference..."):
+    # Lấy tensor của slice
+    # Shape: (H, W) -> Thêm batch & channel -> (1, 1, H, W)
+    x_tensor = torch.unsqueeze(torch.unsqueeze(patient_data["x"][selected_slice], 0), 0).to(device)
+    y_tensor = patient_data["y"][selected_slice].numpy() # Ground Truth NDCT
     
-    # Load model
-    try:
-        model, device = get_model(model_name)
-        st.sidebar.success(f"✅ Đã tải mô hình: {model_name}\n\n🖥️ Thiết bị: {device}")
-    except Exception as e:
-        st.sidebar.error(f"Lỗi tải mô hình: {e}")
-        return
-
-    # Chọn chế độ
-    mode = st.sidebar.radio("Chọn chế độ làm việc:", ["📂 Xử lý cả thư mục (Local)", "⬆️ Upload file lẻ"])
-
-    # Khởi tạo session state cho đường dẫn thư mục nếu chưa có
-    if 'input_dir' not in st.session_state:
-        st.session_state.input_dir = ""
-
-    # Khởi tạo state cho viewer thư mục
-    if 'viewer_active' not in st.session_state:
-        st.session_state.viewer_active = False
-    if 'viewer_files' not in st.session_state:
-        st.session_state.viewer_files = []
-    if 'viewer_dirs' not in st.session_state:
-        st.session_state.viewer_dirs = {}
-
-    # --- Chế độ 1: Xử lý thư mục ---
-    if mode == "📂 Xử lý cả thư mục (Local)":
-        st.header("Xử lý hàng loạt thư mục trên máy")
+    # Inference
+    with torch.no_grad():
+        pred_redcnn = networks["redcnn"](x_tensor)
+        pred_edr = networks["edr_redcnn"](x_tensor)
         
-        col1, col2 = st.columns(2)
-        with col1:
-            # Nút chọn thư mục sử dụng Tkinter
-            if st.button("📂 Chọn thư mục Input"):
-                root = tk.Tk()
-                root.withdraw()
-                root.wm_attributes('-topmost', 1) # Đẩy cửa sổ lên trên cùng
-                folder_path = filedialog.askdirectory(master=root)
-                root.destroy()
-                if folder_path:
-                    st.session_state.input_dir = folder_path
-            
-            input_dir = st.text_input("Đường dẫn thư mục đầu vào:", st.session_state.input_dir)
-
-        with col2:
-            # Output mặc định là result/dcm
-            default_out = os.path.join(os.getcwd(), "result", "dcm")
-            output_dir = st.text_input("Thư mục đầu ra (Output)", default_out)
-
-        if st.button("🚀 Bắt đầu khử nhiễu", type="primary"):
-            if not os.path.exists(input_dir):
-                st.error("❌ Thư mục đầu vào không tồn tại!")
-            else:
-                if not os.path.exists(output_dir):
-                    os.makedirs(output_dir)
-                
-                # Lọc các file ảnh được hỗ trợ
-                supported_extensions = ['.dcm', '.dicom', '.png', '.jpg', '.jpeg', '.tiff', '.tif']
-                files = sorted([f for f in os.listdir(input_dir) 
-                                if os.path.isfile(os.path.join(input_dir, f)) 
-                                and any(f.lower().endswith(ext) for ext in supported_extensions)])
-                
-                if not files:
-                    st.warning("Không tìm thấy file ảnh nào được hỗ trợ (.dcm, .png, .jpg, .tiff) trong thư mục này!")
-                    return
-                
-                progress_bar = st.progress(0)
-                status_text = st.empty()
-                
-                # Placeholder để hiển thị ảnh preview
-                image_spot = st.empty()
-                
-                for i, filename in enumerate(files):
-                    input_path = os.path.join(input_dir, filename)
-                    try:
-                        # Load ảnh (hỗ trợ nhiều định dạng)
-                        input_image = load_image(input_path, is_file_obj=False)
-                        
-                        # Xử lý khử nhiễu
-                        norm_img = normalize(input_image)
-                        input_tensor = torch.from_numpy(norm_img).unsqueeze(0).unsqueeze(0).to(device)
-                        
-                        with torch.no_grad():
-                            output_tensor = model(input_tensor)
-                        
-                        output_array = output_tensor.squeeze().cpu().numpy()
-                        denoised_image = denormalize(output_array)
-                        
-                        # Lưu file
-                        file_ext = os.path.splitext(filename)[1].lower()
-                        output_filename = f"{os.path.splitext(filename)[0]}_denoised{file_ext}"
-                        output_path = os.path.join(output_dir, output_filename)
-                        
-                        # Lưu theo định dạng gốc
-                        if file_ext in ['.dcm', '.dicom']:
-                            # DICOM: giữ nguyên metadata
-                            dcm = pydicom.dcmread(input_path, force=True)
-                            dtype_min = np.iinfo(dcm.pixel_array.dtype).min
-                            dtype_max = np.iinfo(dcm.pixel_array.dtype).max
-                            clipped_image = np.clip(denoised_image, dtype_min, dtype_max)
-                            dcm.PixelData = clipped_image.astype(dcm.pixel_array.dtype).tobytes()
-                            dcm.save_as(output_path)
-                        else:
-                            # PNG, JPG, TIFF: lưu dưới dạng PNG
-                            clipped_image = np.clip(denoised_image, 0, 65535)  # 16-bit range
-                            Image.fromarray(to_uint8(clipped_image)).save(output_path.replace(file_ext, '.png'))
-
-                        # Preview mỗi 5 ảnh
-                        if i % 5 == 0:
-                            col_a, col_b = st.columns(2)
-                            image_spot.image(to_uint8(clipped_image), caption=f"Đang xử lý: {filename}", width=300)
-
-                    except Exception as e:
-                        print(f"Lỗi {filename}: {e}")
-                    
-                    # Cập nhật tiến độ
-                    progress_bar.progress((i + 1) / len(files))
-                    status_text.text(f"Đang xử lý {i+1}/{len(files)}: {filename}")
-                
-                # Cập nhật state để hiển thị viewer
-                st.session_state.viewer_active = True
-                st.session_state.viewer_files = files
-                st.session_state.viewer_dirs = {"input": input_dir, "output": output_dir}
-                
-                st.success("✅ Hoàn thành! Kéo xuống dưới để xem kết quả.")
-
-        # --- Phần hiển thị kết quả dạng cuộn (Viewer) ---
-        if st.session_state.viewer_active and st.session_state.viewer_files:
-            st.markdown("---")
-            st.header("🎞️ Xem kết quả: Cuộn để xem các lát cắt")
-            
-            # Thanh trượt để chọn lát cắt (giả lập hiệu ứng cuộn ảnh động)
-            slice_idx = st.slider(
-                "Kéo thanh trượt để xem các lát cắt (Slice Index)", 
-                min_value=0, 
-                max_value=len(st.session_state.viewer_files) - 1, 
-                value=0,
-                key="slice_slider"
-            )
-            
-            # Lấy tên file hiện tại dựa trên thanh trượt
-            current_file = st.session_state.viewer_files[slice_idx]
-            
-            # Đường dẫn file
-            in_path = os.path.join(st.session_state.viewer_dirs["input"], current_file)
-            out_path = os.path.join(st.session_state.viewer_dirs["output"], current_file)
-            
-            try:
-                # Load ảnh Input và Output (hỗ trợ nhiều định dạng)
-                img_in = load_image(in_path, is_file_obj=False)
-                img_out = load_image(out_path, is_file_obj=False)
-                
-                # Hiển thị side-by-side
-                c1, c2 = st.columns(2)
-                with c1:
-                    st.image(to_uint8(img_in), caption=f"Input: {current_file}", use_column_width=True)
-                with c2:
-                    st.image(to_uint8(img_out), caption=f"Denoised: {current_file}", use_column_width=True)
-            except Exception as e:
-                st.error(f"Không thể đọc file {current_file}: {e}")
-
-    # --- Chế độ 2: Upload file ---
-    elif mode == "⬆️ Upload file lẻ":
-        st.header("Upload và khử nhiễu nhanh")
-        uploaded_file = st.file_uploader(
-            "Chọn file ảnh", 
-            type=["dcm", "dicom", "png", "jpg", "jpeg", "tiff", "tif"],
-            help="Hỗ trợ: DICOM (.dcm), PNG, JPG, TIFF"
-        )
+    # Denormalize về HU (Hounsfield Units)
+    def to_numpy_hu(tensor):
+        img_np = dataset.denormalize(tensor.cpu().squeeze()).numpy()
+        return dataset._convert_hu(img_np, to_hu=True)
         
-        if uploaded_file is not None:
-            # Đọc file từ bộ nhớ (hỗ trợ nhiều định dạng)
-            input_image = load_image(uploaded_file, is_file_obj=True)
+    img_ld = to_numpy_hu(x_tensor)
+    img_redcnn = to_numpy_hu(pred_redcnn)
+    img_edr = to_numpy_hu(pred_edr)
+    img_ndct = to_numpy_hu(torch.tensor(y_tensor))
 
-            # Hiển thị ảnh gốc
-            col1, col2 = st.columns(2)
-            with col1:
-                st.image(to_uint8(input_image), caption="Ảnh gốc (Nhiễu)", use_column_width=True)
+def window_image(img, vmin, vmax):
+    """Cắt giá trị HU theo window để hiển thị đẹp hơn"""
+    img_clipped = np.clip(img, vmin, vmax)
+    return (img_clipped - vmin) / (vmax - vmin)
 
-            if st.button("✨ Khử nhiễu ngay"):
-                # Tạo thư mục result/img nếu chưa có
-                save_dir = os.path.join(os.getcwd(), "result", "img")
-                if not os.path.exists(save_dir):
-                    os.makedirs(save_dir)
+def get_sobel_edges(img):
+    """Tính toán Sobel Edge Map"""
+    dx = sobel(img, axis=0)
+    dy = sobel(img, axis=1)
+    mag = np.hypot(dx, dy)
+    mag *= 255.0 / np.max(mag)
+    return mag
 
-                with st.spinner("Đang xử lý..."):
-                    norm_img = normalize(input_image)
-                    input_tensor = torch.from_numpy(norm_img).unsqueeze(0).unsqueeze(0).to(device)
-                    
-                    with torch.no_grad():
-                        output_tensor = model(input_tensor)
-                    
-                    output_array = output_tensor.squeeze().cpu().numpy()
-                    denoised_image = denormalize(output_array)
-                    
-                    # Lưu kết quả
-                    file_ext = os.path.splitext(uploaded_file.name)[1].lower()
-                    if file_ext in ['.dcm', '.dicom']:
-                        # DICOM: giữ nguyên định dạng
-                        dcm = pydicom.dcmread(uploaded_file, force=True)
-                        dtype_min = np.iinfo(dcm.pixel_array.dtype).min
-                        dtype_max = np.iinfo(dcm.pixel_array.dtype).max
-                        clipped_image = np.clip(denoised_image, dtype_min, dtype_max)
-                        output_filename = f"{os.path.splitext(uploaded_file.name)[0]}_denoised.dcm"
-                        output_path = os.path.join(save_dir, output_filename)
-                        dcm.PixelData = clipped_image.astype(dcm.pixel_array.dtype).tobytes()
-                        dcm.save_as(output_path)
-                    else:
-                        # PNG, JPG, TIFF: lưu dưới dạng PNG
-                        clipped_image = np.clip(denoised_image, 0, 65535)
-                        output_filename = f"{os.path.splitext(uploaded_file.name)[0]}_denoised.png"
-                        output_path = os.path.join(save_dir, output_filename)
-                        Image.fromarray(to_uint8(clipped_image)).save(output_path)
+# ==========================================
+# 5. VISUALIZATION
+# ==========================================
+images = {
+    "LDCT (Input)": img_ld,
+    "RED-CNN (Baseline)": img_redcnn,
+    "EDR-REDNet (Ours)": img_edr,
+    "NDCT (Target)": img_ndct
+}
 
-                # Hiển thị kết quả
-                with col2:
-                    st.image(to_uint8(clipped_image), caption="Ảnh sau khi khử nhiễu", use_column_width=True)
-                
-                st.success(f"Xử lý xong! Ảnh đã được lưu tại: {output_path}")
+# Hàng 1: Hình ảnh hiển thị bình thường
+st.subheader("Trực quan hóa Khử nhiễu")
+cols = st.columns(4)
+for i, (title, img) in enumerate(images.items()):
+    with cols[i]:
+        st.markdown(f"**{title}**")
+        fig, ax = plt.subplots()
+        ax.imshow(window_image(img, hu_min, hu_max), cmap="gray")
+        ax.axis("off")
+        st.pyplot(fig, use_container_width=True)
 
-if __name__ == "__main__":
-    main()
+# Hàng 2: Difference Map (Nếu bật)
+if show_diff:
+    st.subheader("Bản đồ Lỗi (So với NDCT)")
+    st.markdown("Màu càng đậm (đỏ/xanh) tức là chênh lệch với ảnh thực tế NDCT càng lớn. Màu trắng là giống hoàn toàn.")
+    diff_cols = st.columns(4)
+    for i, (title, img) in enumerate(images.items()):
+        with diff_cols[i]:
+            if title == "NDCT (Target)":
+                continue
+            st.markdown(f"**Error: {title}**")
+            diff = img - img_ndct
+            fig, ax = plt.subplots()
+            # Dùng colormap seismic để highlight sai số âm/dương
+            im = ax.imshow(diff, cmap="seismic", vmin=-200, vmax=200)
+            ax.axis("off")
+            st.pyplot(fig, use_container_width=True)
+
+# Hàng 3: Edge Map (Nếu bật)
+if show_edge:
+    st.subheader("Bản đồ Biên (Sobel Edge Map)")
+    st.markdown("So sánh khả năng giữ lại các chi tiết góc cạnh, viền mô mềm của các mô hình.")
+    edge_cols = st.columns(4)
+    for i, (title, img) in enumerate(images.items()):
+        with edge_cols[i]:
+            st.markdown(f"**Edges: {title}**")
+            edges = get_sobel_edges(img)
+            fig, ax = plt.subplots()
+            ax.imshow(edges, cmap="gray")
+            ax.axis("off")
+            st.pyplot(fig, use_container_width=True)
