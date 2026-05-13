@@ -112,15 +112,17 @@ class Model(nn.Module):
     def __init__(self, args, out_ch: int = 96):
         super().__init__()
 
+        self.use_sobel_input = getattr(args, "use_sobel_input", True) if args is not None else True
         num_edge_blocks = getattr(args, "num_edge_blocks", 2) if args is not None else 2
 
         # ── Edge extractor (non-trainable) ──────────────────────────────────────
-        self.sobel = FixedSobelLayer()  # output: (B, 4, H, W)
-
-        # Project 4-channel edge map → out_ch để cộng vào bottleneck
-        self.proj_edge = nn.Conv2d(4, out_ch, kernel_size=1, bias=False)
+        if self.use_sobel_input:
+            self.sobel = FixedSobelLayer()  # output: (B, 4, H, W)
+            # Project 4-channel edge map → out_ch để cộng vào bottleneck
+            self.proj_edge = nn.Conv2d(4, out_ch, kernel_size=1, bias=False)
 
         # ── Encoder (giống RED-CNN) ──────────────────────────────────────────────
+        # ... (giữ nguyên các lớp conv1-5) ...
         self.conv1 = nn.Conv2d(1, out_ch, kernel_size=5, stride=1, padding=0)
         self.conv2 = nn.Conv2d(out_ch, out_ch, kernel_size=5, stride=1, padding=0)
         self.conv3 = nn.Conv2d(out_ch, out_ch, kernel_size=5, stride=1, padding=0)
@@ -146,11 +148,7 @@ class Model(nn.Module):
     def forward(self, x):
         # ── Global skip (residual learning) ─────────────────────────────────────
         residual_1 = x
-
-        # ── Edge map từ Sobel (non-trainable) ───────────────────────────────────
-        # Resize về cùng kích thước bottleneck sau khi qua Encoder
-        edge_map = self.sobel(x)  # (B, 4, H, W)
-
+        
         # ── Encoder ─────────────────────────────────────────────────────────────
         out = self.relu(self.conv1(x))
         out = self.relu(self.conv2(out))
@@ -162,12 +160,13 @@ class Model(nn.Module):
 
         out = self.relu(self.conv5(out))  # bottleneck feature: (B, 96, H', W')
 
-        # ── Tích hợp edge map vào bottleneck ────────────────────────────────────
-        # Resize edge_map về spatial size của bottleneck
-        edge_proj = self.proj_edge(
-            F.interpolate(edge_map, size=out.shape[2:], mode="bilinear", align_corners=False)
-        )  # (B, 96, H', W')
-        out = out + edge_proj  # ADD (không concat để không tăng params decoder)
+        # ── Tích hợp edge map vào bottleneck (nếu bật) ──────────────────────────
+        if self.use_sobel_input:
+            edge_map = self.sobel(x)  # (B, 4, H, W)
+            edge_proj = self.proj_edge(
+                F.interpolate(edge_map, size=out.shape[2:], mode="bilinear", align_corners=False)
+            )  # (B, 96, H', W')
+            out = out + edge_proj  # ADD (không concat để không tăng params decoder)
 
         # ── EdgeDilatedResidualBlocks ────────────────────────────────────────────
         out = self.edge_blocks(out)

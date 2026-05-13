@@ -40,4 +40,16 @@ def add_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=2,
         help="Number of EdgeDilatedResidualBlocks at bottleneck (default = 2)",
     )
+    parser.add_argument(
+        "--use_sobel_input",
+        action="store_true",
+        default=True,
+        help="Whether to use FixedSobelLayer features at bottleneck (default = True)",
+    )
+    parser.add_argument(
+        "--no_sobel_input",
+        action="store_false",
+        dest="use_sobel_input",
+        help="Disable FixedSobelLayer features for ablation study",
+    )
     return parser
