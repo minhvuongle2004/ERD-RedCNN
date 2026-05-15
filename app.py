@@ -94,9 +94,43 @@ with tab_ablation:
 
     import pandas as pd
 
-    # --- Định nghĩa các Variant và đường dẫn ---
-    # CSV không có header: cột = [iteration, SSIM, PSNR, Loss]
-    CSV_COLS = ["iteration", "SSIM", "PSNR", "Loss"]
+    # --- Hàm đọc CSV thông minh: tự phát hiện header hay không ---
+    def read_metrics_csv(filepath):
+        """Trả về DataFrame với các cột chuẩn: iteration, SSIM, PSNR."""
+        # Đọc thử để kiểm tra header
+        raw = pd.read_csv(filepath, header=None, nrows=1)
+        first_val = str(raw.iloc[0, 0])
+        has_header = not first_val.replace('.','',1).lstrip('-').isdigit()
+
+        if has_header:
+            df = pd.read_csv(filepath)
+            # Chuẩn hóa tên cột (Iteration/iteration, SSIM, PSNR)
+            df.columns = [c.strip() for c in df.columns]
+        else:
+            # CSV không có header (format cũ): iteration, SSIM, PSNR, RMSE
+            df = pd.read_csv(filepath, header=None,
+                             names=["Iteration", "SSIM", "PSNR", "RMSE"])
+        # Đảm bảo tên cột Iteration đồng nhất
+        if "iteration" in df.columns and "Iteration" not in df.columns:
+            df.rename(columns={"iteration": "Iteration"}, inplace=True)
+        return df
+
+    def read_losses_csv(filepath):
+        """Trả về DataFrame với các cột chuẩn: Iteration, loss_train."""
+        raw = pd.read_csv(filepath, header=None, nrows=1)
+        first_val = str(raw.iloc[0, 0])
+        has_header = not first_val.replace('.','',1).lstrip('-').isdigit()
+
+        if has_header:
+            df = pd.read_csv(filepath)
+            df.columns = [c.strip() for c in df.columns]
+        else:
+            df = pd.read_csv(filepath, header=None,
+                             names=["Iteration", "loss train", "loss val"])
+        if "iteration" in df.columns and "Iteration" not in df.columns:
+            df.rename(columns={"iteration": "Iteration"}, inplace=True)
+        return df
+
     VARIANTS = {
         # Variant A: dùng pretrained hub, không có CSV training riêng
         "A — RED-CNN (Baseline)":    {"sobel_input": "❌", "edge_block": "❌", "sobel_loss": "❌",
@@ -106,7 +140,7 @@ with tab_ablation:
                                       "folders": ["results/training/VariantB/Seed1339"], "pretrained": False},
         "C — + Sobel Input":          {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "❌",
                                       "folders": ["results/training/VariantC/Seed1339"], "pretrained": False},
-        # Variant D: file nằm trực tiếp trong seed2024/ (không có lan1)
+        # Variant D: file nằm trực tiếp trong seed2024/
         "D — Full EDR-REDNet (Ours)": {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "✅",
                                       "folders": ["results/training/seed2024"], "pretrained": False},
     }
@@ -161,8 +195,7 @@ with tab_ablation:
         mf = metrics_files[name]
         if mf and os.path.exists(mf):
             try:
-                # CSV không có header → đặt tên cột thủ công
-                df = pd.read_csv(mf, header=None, names=CSV_COLS)
+                df = read_metrics_csv(mf)
                 loaded_metrics_dfs[name] = df
                 best_ssim = float(df["SSIM"].max())
                 best_psnr = float(df["PSNR"].max())
@@ -200,19 +233,18 @@ with tab_ablation:
     if loaded_metrics_dfs:
         fig_lc, ax_lc = plt.subplots(figsize=(12, 5))
         for name, df in loaded_metrics_dfs.items():
-            # CSV columns: iteration, SSIM, PSNR, Loss
-            ax_lc.plot(df["iteration"], df["SSIM"],
+            ax_lc.plot(df["Iteration"], df["SSIM"],
                        label=name, color=colors.get(name), linewidth=2)
         ax_lc.set_xlabel("Iterations")
         ax_lc.set_ylabel("SSIM (Validation)")
         ax_lc.set_title("So sánh tốc độ học và chất lượng cuối của 4 Variant")
         ax_lc.legend()
         ax_lc.grid(True, alpha=0.3)
+        ax_lc.xaxis.set_major_locator(plt.MaxNLocator(8))
         st.pyplot(fig_lc, use_container_width=True)
     else:
         st.info("⏳ Chưa có file kết quả. Hãy train các Variant trước.")
 
-    # --- Loss Curves ---
     loaded_losses_dfs = {}
     for name, meta in VARIANTS.items():
         if meta["pretrained"]:
@@ -220,8 +252,7 @@ with tab_ablation:
         lf = losses_files[name]
         if lf and os.path.exists(lf):
             try:
-                loss_df = pd.read_csv(lf, header=None, names=["iteration", "Loss"])
-                loaded_losses_dfs[name] = loss_df
+                loaded_losses_dfs[name] = read_losses_csv(lf)
             except:
                 pass
 
@@ -229,13 +260,18 @@ with tab_ablation:
         st.subheader("📉 Loss Curves (Train Loss theo Iterations)")
         fig_ll, ax_ll = plt.subplots(figsize=(12, 5))
         for name, df in loaded_losses_dfs.items():
-            ax_ll.plot(df["iteration"], df["Loss"],
-                       label=name, color=colors.get(name), linewidth=2)
+            # Tìm cột loss train (có thể là 'loss train' hoặc 'Loss')
+            loss_col = next((c for c in df.columns
+                             if "loss" in c.lower() and "val" not in c.lower()), None)
+            if loss_col and "Iteration" in df.columns:
+                ax_ll.plot(df["Iteration"], df[loss_col],
+                           label=name, color=colors.get(name), linewidth=2)
         ax_ll.set_xlabel("Iterations")
-        ax_ll.set_ylabel("Loss")
+        ax_ll.set_ylabel("Train Loss")
         ax_ll.set_title("So sánh Train Loss của 4 Variant")
         ax_ll.legend()
         ax_ll.grid(True, alpha=0.3)
+        ax_ll.xaxis.set_major_locator(plt.MaxNLocator(8))
         st.pyplot(fig_ll, use_container_width=True)
 
     # --- Giải thích ---
