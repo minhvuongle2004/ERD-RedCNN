@@ -95,11 +95,20 @@ with tab_ablation:
     import pandas as pd
 
     # --- Định nghĩa các Variant và đường dẫn ---
+    # CSV không có header: cột = [iteration, SSIM, PSNR, Loss]
+    CSV_COLS = ["iteration", "SSIM", "PSNR", "Loss"]
     VARIANTS = {
-        "A — RED-CNN (Baseline)":    {"sobel_input": "❌", "edge_block": "❌", "sobel_loss": "❌", "folders": ["results/training/seed1339/lan1", "results/training/seed1339"]},
-        "B — + EdgeBlock":            {"sobel_input": "❌", "edge_block": "✅", "sobel_loss": "❌", "folders": ["results/training/VariantB/Seed1339"]},
-        "C — + Sobel Input":          {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "❌", "folders": ["results/training/VariantC/Seed1339"]},
-        "D — Full EDR-REDNet (Ours)": {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "✅", "folders": ["results/training/seed2024/lan1", "results/training/seed2024"]},
+        # Variant A: dùng pretrained hub, không có CSV training riêng
+        "A — RED-CNN (Baseline)":    {"sobel_input": "❌", "edge_block": "❌", "sobel_loss": "❌",
+                                      "folders": [], "pretrained": True,
+                                      "known_ssim": 0.8490, "known_psnr": 43.55},
+        "B — + EdgeBlock":            {"sobel_input": "❌", "edge_block": "✅", "sobel_loss": "❌",
+                                      "folders": ["results/training/VariantB/Seed1339"], "pretrained": False},
+        "C — + Sobel Input":          {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "❌",
+                                      "folders": ["results/training/VariantC/Seed1339"], "pretrained": False},
+        # Variant D: file nằm trực tiếp trong seed2024/ (không có lan1)
+        "D — Full EDR-REDNet (Ours)": {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "✅",
+                                      "folders": ["results/training/seed2024"], "pretrained": False},
     }
 
     def find_csv(folders, keyword):
@@ -118,16 +127,17 @@ with tab_ablation:
     losses_files = {}
 
     for name, meta in VARIANTS.items():
-        mf = find_csv(meta["folders"], "Metrics")
-        lf = find_csv(meta["folders"], "Losses")
+        mf = find_csv(meta["folders"], "Metrics") if not meta["pretrained"] else None
+        lf = find_csv(meta["folders"], "Losses") if not meta["pretrained"] else None
         metrics_files[name] = mf
         losses_files[name] = lf
+        status = "🔖 Pretrained" if meta["pretrained"] else ("✅ Có" if mf else "⏳ Chưa có")
         arch_rows.append({
             "Biến thể": name,
             "FixedSobelLayer (Input)": meta["sobel_input"],
             "EdgeBlock (Dilated)": meta["edge_block"],
             "Sobel Loss": meta["sobel_loss"],
-            "Kết quả": "✅ Có" if mf else "⏳ Chưa có"
+            "Kết quả": status
         })
     st.dataframe(pd.DataFrame(arch_rows), use_container_width=True)
 
@@ -137,19 +147,29 @@ with tab_ablation:
     loaded_metrics_dfs = {}
 
     for name, meta in VARIANTS.items():
+        if meta["pretrained"]:
+            # Variant A: dùng số liệu benchmark đã biết từ pretrained hub
+            summary_rows.append({
+                "Biến thể": name,
+                "Best SSIM ↑": f"{meta['known_ssim']:.5f}",
+                "Best PSNR ↑ (dB)": f"{meta['known_psnr']:.3f}",
+                "EdgeBlock": meta["edge_block"],
+                "Sobel Input": meta["sobel_input"],
+                "Sobel Loss": meta["sobel_loss"],
+            })
+            continue
         mf = metrics_files[name]
         if mf and os.path.exists(mf):
             try:
-                df = pd.read_csv(mf)
-                ssim_col = next((c for c in df.columns if "ssim" in c.lower()), None)
-                psnr_col = next((c for c in df.columns if "psnr" in c.lower()), None)
+                # CSV không có header → đặt tên cột thủ công
+                df = pd.read_csv(mf, header=None, names=CSV_COLS)
                 loaded_metrics_dfs[name] = df
-                best_ssim = float(df[ssim_col].max()) if ssim_col else None
-                best_psnr = float(df[psnr_col].max()) if psnr_col else None
+                best_ssim = float(df["SSIM"].max())
+                best_psnr = float(df["PSNR"].max())
                 summary_rows.append({
                     "Biến thể": name,
-                    "Best SSIM ↑": f"{best_ssim:.5f}" if best_ssim else "N/A",
-                    "Best PSNR ↑ (dB)": f"{best_psnr:.3f}" if best_psnr else "N/A",
+                    "Best SSIM ↑": f"{best_ssim:.5f}",
+                    "Best PSNR ↑ (dB)": f"{best_psnr:.3f}",
                     "EdgeBlock": meta["edge_block"],
                     "Sobel Input": meta["sobel_input"],
                     "Sobel Loss": meta["sobel_loss"],
@@ -171,20 +191,18 @@ with tab_ablation:
 
     # --- Learning Curves ---
     st.subheader("📈 Learning Curves (SSIM theo Iterations)")
+    colors = {
+        "A — RED-CNN (Baseline)":    "#888888",
+        "B — + EdgeBlock":            "#4e9af1",
+        "C — + Sobel Input":          "#f1a74e",
+        "D — Full EDR-REDNet (Ours)": "#2ecc71",
+    }
     if loaded_metrics_dfs:
         fig_lc, ax_lc = plt.subplots(figsize=(12, 5))
-        colors = {
-            "A — RED-CNN (Baseline)":    "#888888",
-            "B — + EdgeBlock":            "#4e9af1",
-            "C — + Sobel Input":          "#f1a74e",
-            "D — Full EDR-REDNet (Ours)": "#2ecc71",
-        }
         for name, df in loaded_metrics_dfs.items():
-            ssim_col = next((c for c in df.columns if "ssim" in c.lower()), None)
-            iter_col = next((c for c in df.columns if "iter" in c.lower() or "step" in c.lower()), None)
-            if ssim_col:
-                x = df[iter_col] if iter_col else range(len(df))
-                ax_lc.plot(x, df[ssim_col], label=name, color=colors.get(name), linewidth=2)
+            # CSV columns: iteration, SSIM, PSNR, Loss
+            ax_lc.plot(df["iteration"], df["SSIM"],
+                       label=name, color=colors.get(name), linewidth=2)
         ax_lc.set_xlabel("Iterations")
         ax_lc.set_ylabel("SSIM (Validation)")
         ax_lc.set_title("So sánh tốc độ học và chất lượng cuối của 4 Variant")
@@ -197,28 +215,22 @@ with tab_ablation:
     # --- Loss Curves ---
     loaded_losses_dfs = {}
     for name, meta in VARIANTS.items():
+        if meta["pretrained"]:
+            continue
         lf = losses_files[name]
         if lf and os.path.exists(lf):
             try:
-                loaded_losses_dfs[name] = pd.read_csv(lf)
+                loss_df = pd.read_csv(lf, header=None, names=["iteration", "Loss"])
+                loaded_losses_dfs[name] = loss_df
             except:
                 pass
 
     if loaded_losses_dfs:
         st.subheader("📉 Loss Curves (Train Loss theo Iterations)")
         fig_ll, ax_ll = plt.subplots(figsize=(12, 5))
-        colors = {
-            "A — RED-CNN (Baseline)":    "#888888",
-            "B — + EdgeBlock":            "#4e9af1",
-            "C — + Sobel Input":          "#f1a74e",
-            "D — Full EDR-REDNet (Ours)": "#2ecc71",
-        }
         for name, df in loaded_losses_dfs.items():
-            loss_col = next((c for c in df.columns if "loss" in c.lower()), None)
-            iter_col = next((c for c in df.columns if "iter" in c.lower() or "step" in c.lower()), None)
-            if loss_col:
-                x = df[iter_col] if iter_col else range(len(df))
-                ax_ll.plot(x, df[loss_col], label=name, color=colors.get(name), linewidth=2)
+            ax_ll.plot(df["iteration"], df["Loss"],
+                       label=name, color=colors.get(name), linewidth=2)
         ax_ll.set_xlabel("Iterations")
         ax_ll.set_ylabel("Loss")
         ax_ll.set_title("So sánh Train Loss của 4 Variant")
