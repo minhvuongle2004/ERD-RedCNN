@@ -2,7 +2,10 @@ env/
 *.egg-info
 build/
 *.pyc
-results/
+# Kết quả training: chỉ bỏ qua file .pt (quá lớn, lưu trên Kaggle/Drive)
+# CSV logs, notebooks, và notes vẫn được push lên
+results/**/*.pt
+results/**/*.pth
 wandb/
 .idea/
 site/
