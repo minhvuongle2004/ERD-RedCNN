@@ -41,7 +41,7 @@ np.random.seed(opt.seed)
 
 def load_dicom(path):
     slices = [
-        pydicom.filereader.dcmread(os.path.join(path, s)) for s in os.listdir(path)
+        pydicom.filereader.dcmread(os.path.join(path, s)) for s in os.listdir(path) if s.endswith(".dcm")
     ]
     slices.sort(key=lambda x: float(x.ImagePositionPatient[2]))
     image = np.stack([s.pixel_array for s in slices])
@@ -134,7 +134,27 @@ def main():
 
     full_dose = metadata.loc[metadata["Series Description"] == "full dose images"]
     low_dose = metadata.loc[metadata["Series Description"] == "low dose images"]
-    patients = metadata["Subject ID"].unique()
+    patients_metadata = metadata["Subject ID"].unique()
+    
+    # Filter to only physically downloaded patients
+    patients_downloaded = []
+    base_dir = os.path.join(opt.datafolder, "LDCT-and-Projection-data")
+    if os.path.exists(base_dir):
+        for p in os.listdir(base_dir):
+            if p in patients_metadata:
+                studies = os.listdir(os.path.join(base_dir, p))
+                if studies:
+                    series = os.listdir(os.path.join(base_dir, p, studies[0]))
+                    low_sub = next((s for s in series if "Low Dose" in s), None)
+                    full_sub = next((s for s in series if "Full Dose" in s), None)
+                    if low_sub and full_sub:
+                        low_count = len(os.listdir(os.path.join(base_dir, p, studies[0], low_sub)))
+                        full_count = len(os.listdir(os.path.join(base_dir, p, studies[0], full_sub)))
+                        if low_count > 0 and full_count > 0:
+                            patients_downloaded.append(p)
+                            
+    patients = list(set(patients_metadata).intersection(patients_downloaded))
+    patients.sort()
 
     # Generate train, val, test split
     for exam_type in ["C", "L", "N"]:
@@ -148,15 +168,18 @@ def main():
     # Colllect metadata about each scan
     for split in splits:
         for i, patient in enumerate(subset[split]):
-            n_images = full_dose.loc[full_dose["Subject ID"] == patient][
-                "Number of Images"
-            ].item()
-            input_path = low_dose.loc[low_dose["Subject ID"] == patient][
-                "File Location"
-            ].item()
-            target_path = full_dose.loc[full_dose["Subject ID"] == patient][
-                "File Location"
-            ].item()
+            studies = os.listdir(os.path.join(base_dir, patient))
+            study_dir = studies[0]
+            series = os.listdir(os.path.join(base_dir, patient, study_dir))
+            
+            input_subpath = next((s for s in series if "Low Dose" in s), "")
+            target_subpath = next((s for s in series if "Full Dose" in s), "")
+            
+            input_path = f"./LDCT-and-Projection-data/{patient}/{study_dir}/{input_subpath}"
+            target_path = f"./LDCT-and-Projection-data/{patient}/{study_dir}/{target_subpath}"
+            
+            n_images = len([f for f in os.listdir(os.path.join(base_dir, patient, study_dir, target_subpath)) if f.endswith(".dcm")])
+
             subset[split][i] = {
                 "input": input_path,
                 "target": target_path,
