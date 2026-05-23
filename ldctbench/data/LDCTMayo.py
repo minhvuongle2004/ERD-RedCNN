@@ -47,6 +47,10 @@ class LDCTMayo(Dataset):
         if self.data_subset < 1.0:
             self.samples = self.samples[: int(len(self.samples) * self.data_subset)]
 
+        # WeightedRandomSampler yêu cầu thuộc tính weights
+        # Dùng uniform weights (tất cả bằng nhau) = random sampling thông thường
+        self.weights = torch.ones(len(self.samples))
+
     def _get_sorted_files(self, folder_rel_path):
         if folder_rel_path in self.patient_cache:
             return self.patient_cache[folder_rel_path]
