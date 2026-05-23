@@ -7,7 +7,9 @@ import numpy as np
 import streamlit as st
 import matplotlib.pyplot as plt
 import pydicom
+import pandas as pd
 from skimage import filters, metrics
+from scipy import ndimage
 
 st.set_page_config(page_title="EDR-REDNet Visualizer", layout="wide")
 
@@ -17,6 +19,8 @@ st.set_page_config(page_title="EDR-REDNet Visualizer", layout="wide")
 original_load = torch.load
 def safe_load(*args, **kwargs):
     kwargs['weights_only'] = False
+    if 'map_location' not in kwargs:
+        kwargs['map_location'] = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     return original_load(*args, **kwargs)
 torch.load = safe_load
 
@@ -37,16 +41,39 @@ from ldctbench.hub import load_model
 # ==========================================
 # 2. SETUP CACHING & MODELS
 # ==========================================
+def _setup_variant_wandb(run_name, ckpt_path, cfg_path, overrides=None):
+    """Copy checkpoint + config vào fake wandb dir để setup_trained_model dùng được."""
+    d = os.path.join("wandb", run_name, "files")
+    os.makedirs(d, exist_ok=True)
+    if os.path.exists(ckpt_path) and os.path.exists(cfg_path):
+        if overrides:
+            with open(cfg_path, 'r', encoding='utf-8') as f:
+                cfg = yaml.load(f, Loader=yaml.FullLoader)
+            cfg.update(overrides)
+            with open(os.path.join(d, "args.yaml"), 'w', encoding='utf-8') as f:
+                yaml.dump(cfg, f)
+        else:
+            shutil.copy(cfg_path, os.path.join(d, "args.yaml"))
+        shutil.copy(ckpt_path, os.path.join(d, "best_SSIM.pt"))
+        return True
+    return False
+
 @st.cache_resource
 def setup_environment():
+    # Variant D
     checkpoint_path = r"results\training\seed2024\lan1\seed2024_best_SSIM.pt"
     if not os.path.exists(checkpoint_path):
-        checkpoint_path = r"results\training\seed2024\seed2024_best_SSIM.pt"
-    fake_run_dir = r"wandb\edr_redcnn_seed2024\files"
-    os.makedirs(fake_run_dir, exist_ok=True)
-    if os.path.exists(checkpoint_path):
-        shutil.copy(r"configs\edrrednet.yaml", os.path.join(fake_run_dir, "args.yaml"))
-        shutil.copy(checkpoint_path, os.path.join(fake_run_dir, "best_SSIM.pt"))
+        checkpoint_path = r"results\training\VariantD\seed2024\seed2024_best_SSIM.pt"
+    cfg = r"configs\edrrednet.yaml"
+    _setup_variant_wandb("edr_redcnn_seed2024", checkpoint_path, cfg)
+    # Variant B
+    _setup_variant_wandb("edr_variant_b",
+        r"results\training\VariantB\Seed1339\variantB_seed1339_best_SSIM.pt", cfg,
+        overrides={"use_sobel_input": False})
+    # Variant C
+    _setup_variant_wandb("edr_variant_c",
+        r"results\training\VariantC\Seed1339\variantC_seed1339_best_SSIM.pt", cfg,
+        overrides={"use_sobel_input": True})
     return checkpoint_path
 
 @st.cache_resource
@@ -57,15 +84,26 @@ def load_dataset():
 def load_networks():
     dev = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     networks = {}
+    # Variant A — RED-CNN pretrained
     networks["redcnn"] = load_model("redcnn", eval=True).to(dev)
-    net = setup_trained_model(
-        run_name="edr_redcnn_seed2024",
-        device=dev,
-        network_name="Model",
-        state_dict="best_SSIM",
-        eval=True,
-    )
-    networks["edr_redcnn"] = net
+    networks["variant_a"] = networks["redcnn"]
+    # Variant D — Full EDR-REDNet
+    net_d = setup_trained_model(run_name="edr_redcnn_seed2024", device=dev,
+        network_name="Model", state_dict="best_SSIM", eval=True)
+    networks["edr_redcnn"] = net_d
+    networks["variant_d"] = net_d
+    # Variant B
+    try:
+        networks["variant_b"] = setup_trained_model(run_name="edr_variant_b", device=dev,
+            network_name="Model", state_dict="best_SSIM", eval=True)
+    except Exception:
+        networks["variant_b"] = None
+    # Variant C
+    try:
+        networks["variant_c"] = setup_trained_model(run_name="edr_variant_c", device=dev,
+            network_name="Model", state_dict="best_SSIM", eval=True)
+    except Exception:
+        networks["variant_c"] = None
     return networks, dev
 
 ckpt_path = setup_environment()
@@ -85,205 +123,225 @@ tab_infer, tab_ablation = st.tabs(["🖼️ So sánh Mô hình", "🧪 Ablation 
 # ==========================================
 # TAB 2: ABLATION STUDY
 # ==========================================
+# =========================================================
+# GLOBAL UTILITIES (dùng ở cả 2 tab)
+# =========================================================
+def window_image(img, vmin, vmax):
+    return (np.clip(img, vmin, vmax) - vmin) / (vmax - vmin)
+
+def get_edge_map(img):
+    return np.hypot(ndimage.sobel(img, axis=0), ndimage.sobel(img, axis=1))
+
+def calc_metrics(pred, target, roi_target=None, roi_bg=None):
+    from sewar.full_ref import vifp
+    vmin, vmax = -1024.0, 3000.0
+    p_n = (np.clip(pred, vmin, vmax) - vmin) / (vmax - vmin)
+    t_n = (np.clip(target, vmin, vmax) - vmin) / (vmax - vmin)
+    ssim_v = metrics.structural_similarity(t_n, p_n, data_range=1.0)
+    psnr_v = metrics.peak_signal_noise_ratio(t_n, p_n, data_range=1.0)
+    vif_v  = vifp(t_n, p_n)
+    ep = get_edge_map(p_n); et = get_edge_map(t_n)
+    ep = (ep - ep.min()) / (ep.max() - ep.min() + 1e-8)
+    et = (et - et.min()) / (et.max() - et.min() + 1e-8)
+    edge_ssim = metrics.structural_similarity(et, ep, data_range=1.0)
+    
+    res = {"SSIM": ssim_v, "PSNR": psnr_v, "VIF": vif_v, "Edge SSIM": edge_ssim}
+    
+    # Tính CNR và HU Deviation nếu có ROI
+    if roi_target and roi_bg:
+        tx, ty, tw, th = roi_target
+        bx, by, bw, bh = roi_bg
+        
+        pred_roi_t = pred[ty:ty+th, tx:tx+tw]
+        pred_roi_b = pred[by:by+bh, bx:bx+bw]
+        
+        mean_t = np.mean(pred_roi_t)
+        mean_b = np.mean(pred_roi_b)
+        std_b = np.std(pred_roi_b) + 1e-8
+        
+        cnr = abs(mean_t - mean_b) / std_b
+        res["CNR"] = cnr
+        res["HU Dev (Bg)"] = std_b
+        
+    return res
+
+def to_numpy_hu(tensor, ds):
+    img_np = ds.denormalize(tensor.cpu().squeeze()).numpy()
+    return ds._convert_hu(img_np, to_hu=True)
+
+# =========================================================
 with tab_ablation:
     st.header("🧪 Ablation Study — Phân tích đóng góp từng thành phần")
-    st.markdown("""
-    Bảng dưới đây so sánh hiệu năng của 4 biến thể kiến trúc để chứng minh vai trò
-    của từng thành phần trong EDR-REDNet.
-    """)
+    st.markdown("So sánh 4 biến thể kiến trúc để chứng minh vai trò từng thành phần trong EDR-REDNet.")
 
-    import pandas as pd
-
-    # --- Hàm đọc CSV thông minh: tự phát hiện header hay không ---
-    def read_metrics_csv(filepath):
-        """Trả về DataFrame với các cột chuẩn: iteration, SSIM, PSNR."""
-        # Đọc thử để kiểm tra header
-        raw = pd.read_csv(filepath, header=None, nrows=1)
-        first_val = str(raw.iloc[0, 0])
-        has_header = not first_val.replace('.','',1).lstrip('-').isdigit()
-
-        if has_header:
-            df = pd.read_csv(filepath)
-            # Chuẩn hóa tên cột (Iteration/iteration, SSIM, PSNR)
-            df.columns = [c.strip() for c in df.columns]
-        else:
-            # CSV không có header (format cũ): iteration, SSIM, PSNR, RMSE
-            df = pd.read_csv(filepath, header=None,
-                             names=["Iteration", "SSIM", "PSNR", "RMSE"])
-        # Đảm bảo tên cột Iteration đồng nhất
-        if "iteration" in df.columns and "Iteration" not in df.columns:
-            df.rename(columns={"iteration": "Iteration"}, inplace=True)
-        return df
-
-    def read_losses_csv(filepath):
-        """Trả về DataFrame với các cột chuẩn: Iteration, loss_train."""
-        raw = pd.read_csv(filepath, header=None, nrows=1)
-        first_val = str(raw.iloc[0, 0])
-        has_header = not first_val.replace('.','',1).lstrip('-').isdigit()
-
-        if has_header:
-            df = pd.read_csv(filepath)
-            df.columns = [c.strip() for c in df.columns]
-        else:
-            df = pd.read_csv(filepath, header=None,
-                             names=["Iteration", "loss train", "loss val"])
-        if "iteration" in df.columns and "Iteration" not in df.columns:
-            df.rename(columns={"iteration": "Iteration"}, inplace=True)
-        return df
-
-    VARIANTS = {
-        # Variant A: dùng pretrained hub, không có CSV training riêng
-        "A — RED-CNN (Baseline)":    {"sobel_input": "❌", "edge_block": "❌", "sobel_loss": "❌",
-                                      "folders": [], "pretrained": True,
-                                      "known_ssim": 0.8490, "known_psnr": 43.55},
-        "B — + EdgeBlock":            {"sobel_input": "❌", "edge_block": "✅", "sobel_loss": "❌",
-                                      "folders": ["results/training/VariantB/Seed1339"], "pretrained": False},
-        "C — + Sobel Input":          {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "❌",
-                                      "folders": ["results/training/VariantC/Seed1339"], "pretrained": False},
-        # Variant D: file nằm trực tiếp trong seed2024/
-        "D — Full EDR-REDNet (Ours)": {"sobel_input": "✅", "edge_block": "✅", "sobel_loss": "✅",
-                                      "folders": ["results/training/seed2024"], "pretrained": False},
-    }
-
-    def find_csv(folders, keyword):
-        for folder in folders:
-            if not os.path.isdir(folder):
-                continue
-            for f in os.listdir(folder):
-                if keyword in f and f.endswith(".csv"):
-                    return os.path.join(folder, f)
-        return None
-
-    # --- Bảng Kiến trúc ---
-    st.subheader("🏗️ Cấu hình các Biến thể")
-    arch_rows = []
-    metrics_files = {}
-    losses_files = {}
-
-    for name, meta in VARIANTS.items():
-        mf = find_csv(meta["folders"], "Metrics") if not meta["pretrained"] else None
-        lf = find_csv(meta["folders"], "Losses") if not meta["pretrained"] else None
-        metrics_files[name] = mf
-        losses_files[name] = lf
-        status = "🔖 Pretrained" if meta["pretrained"] else ("✅ Có" if mf else "⏳ Chưa có")
-        arch_rows.append({
-            "Biến thể": name,
-            "FixedSobelLayer (Input)": meta["sobel_input"],
-            "EdgeBlock (Dilated)": meta["edge_block"],
-            "Sobel Loss": meta["sobel_loss"],
-            "Kết quả": status
-        })
-    st.dataframe(pd.DataFrame(arch_rows), use_container_width=True)
-
-    # --- Bảng So sánh Số liệu ---
-    st.subheader("📊 Bảng So sánh Số liệu (Best Validation)")
-    summary_rows = []
-    loaded_metrics_dfs = {}
-
-    for name, meta in VARIANTS.items():
-        if meta["pretrained"]:
-            # Variant A: dùng số liệu benchmark đã biết từ pretrained hub
-            summary_rows.append({
-                "Biến thể": name,
-                "Best SSIM ↑": f"{meta['known_ssim']:.5f}",
-                "Best PSNR ↑ (dB)": f"{meta['known_psnr']:.3f}",
-                "EdgeBlock": meta["edge_block"],
-                "Sobel Input": meta["sobel_input"],
-                "Sobel Loss": meta["sobel_loss"],
-            })
-            continue
-        mf = metrics_files[name]
-        if mf and os.path.exists(mf):
-            try:
-                df = read_metrics_csv(mf)
-                loaded_metrics_dfs[name] = df
-                best_ssim = float(df["SSIM"].max())
-                best_psnr = float(df["PSNR"].max())
-                summary_rows.append({
-                    "Biến thể": name,
-                    "Best SSIM ↑": f"{best_ssim:.5f}",
-                    "Best PSNR ↑ (dB)": f"{best_psnr:.3f}",
-                    "EdgeBlock": meta["edge_block"],
-                    "Sobel Input": meta["sobel_input"],
-                    "Sobel Loss": meta["sobel_loss"],
-                })
-            except Exception as e:
-                summary_rows.append({
-                    "Biến thể": name, "Best SSIM ↑": f"Lỗi: {e}",
-                    "Best PSNR ↑ (dB)": "—", "EdgeBlock": meta["edge_block"],
-                    "Sobel Input": meta["sobel_input"], "Sobel Loss": meta["sobel_loss"]
-                })
-        else:
-            summary_rows.append({
-                "Biến thể": name, "Best SSIM ↑": "⏳ Chưa có",
-                "Best PSNR ↑ (dB)": "⏳ Chưa có", "EdgeBlock": meta["edge_block"],
-                "Sobel Input": meta["sobel_input"], "Sobel Loss": meta["sobel_loss"]
-            })
-
-    st.dataframe(pd.DataFrame(summary_rows), use_container_width=True)
-
-    # --- Learning Curves ---
-    st.subheader("📈 Learning Curves (SSIM theo Iterations)")
-    colors = {
-        "A — RED-CNN (Baseline)":    "#888888",
-        "B — + EdgeBlock":            "#4e9af1",
-        "C — + Sobel Input":          "#f1a74e",
-        "D — Full EDR-REDNet (Ours)": "#2ecc71",
-    }
-    if loaded_metrics_dfs:
-        fig_lc, ax_lc = plt.subplots(figsize=(12, 5))
-        for name, df in loaded_metrics_dfs.items():
-            ax_lc.plot(df["Iteration"], df["SSIM"],
-                       label=name, color=colors.get(name), linewidth=2)
-        ax_lc.set_xlabel("Iterations")
-        ax_lc.set_ylabel("SSIM (Validation)")
-        ax_lc.set_title("So sánh tốc độ học và chất lượng cuối của 4 Variant")
-        ax_lc.legend()
-        ax_lc.grid(True, alpha=0.3)
-        ax_lc.xaxis.set_major_locator(plt.MaxNLocator(8))
-        st.pyplot(fig_lc, use_container_width=True)
-    else:
-        st.info("⏳ Chưa có file kết quả. Hãy train các Variant trước.")
-
-    loaded_losses_dfs = {}
-    for name, meta in VARIANTS.items():
-        if meta["pretrained"]:
-            continue
-        lf = losses_files[name]
-        if lf and os.path.exists(lf):
-            try:
-                loaded_losses_dfs[name] = read_losses_csv(lf)
-            except:
-                pass
-
-    if loaded_losses_dfs:
-        st.subheader("📉 Loss Curves (Train Loss theo Iterations)")
-        fig_ll, ax_ll = plt.subplots(figsize=(12, 5))
-        for name, df in loaded_losses_dfs.items():
-            # Tìm cột loss train (có thể là 'loss train' hoặc 'Loss')
-            loss_col = next((c for c in df.columns
-                             if "loss" in c.lower() and "val" not in c.lower()), None)
-            if loss_col and "Iteration" in df.columns:
-                ax_ll.plot(df["Iteration"], df[loss_col],
-                           label=name, color=colors.get(name), linewidth=2)
-        ax_ll.set_xlabel("Iterations")
-        ax_ll.set_ylabel("Train Loss")
-        ax_ll.set_title("So sánh Train Loss của 4 Variant")
-        ax_ll.legend()
-        ax_ll.grid(True, alpha=0.3)
-        ax_ll.xaxis.set_major_locator(plt.MaxNLocator(8))
-        st.pyplot(fig_ll, use_container_width=True)
-
-    # --- Giải thích ---
+    # ---- Live Inference Section ----
     st.markdown("---")
-    st.subheader("💡 Giải thích Kết quả")
-    st.markdown("""
-    | Bước | Câu hỏi được trả lời |
-    |------|----------------------|
-    | **A → B** | Thêm khối Dilated Residual vào giữa mạng có giúp tăng SSIM không? |
-    | **B → C** | Nạp thêm bản đồ biên Sobel vào đầu vào có giúp mạng học tốt hơn không? |
-    | **C → D** | Dùng thêm Sobel Loss trong hàm mất mát có phải là yếu tố đột phá nhất không? |
-    """)
+    st.subheader("🔬 So sánh Trực tiếp trên Lát cắt (Live Inference)")
+
+    VARIANT_META = {
+        "A — RED-CNN (Baseline)":     {"key": "variant_a", "color": "#888888"},
+        "B — + EdgeBlock":            {"key": "variant_b", "color": "#4e9af1"},
+        "C — + Sobel Input":          {"key": "variant_c", "color": "#f1a74e"},
+        "D — Full EDR-REDNet (Ours)": {"key": "variant_d", "color": "#2ecc71"},
+    }
+
+    col_ctrl1, col_ctrl2 = st.columns([1, 2])
+    with col_ctrl1:
+        patient_names_abl = [p["info"]["id"] for p in dataset.samples]
+        abl_pat = st.selectbox("Chọn bệnh nhân", range(len(patient_names_abl)),
+                               format_func=lambda i: patient_names_abl[i], key="abl_pat")
+    abl_batch = dataset[abl_pat]
+    n_sl = abl_batch["info"]["n_slices"]
+    with col_ctrl2:
+        abl_sl = st.slider("Chọn lát cắt", 0, n_sl - 1, n_sl // 2, key="abl_sl")
+
+    abl_hu_min = st.sidebar.slider("Ablation Min HU", -1024, 1024, -160, key="abl_hmin")
+    abl_hu_max = st.sidebar.slider("Ablation Max HU", -1024, 3000, 245, key="abl_hmax")
+
+    x_abl = abl_batch["x"][abl_sl].unsqueeze(0).unsqueeze(0).to(device)
+    y_abl_np = abl_batch["y"][abl_sl].numpy()
+
+    # ---- ROI Selection UI ----
+    st.markdown("### 🎯 Chọn Vùng Quan Tâm (ROI) để tính CNR")
+    st.markdown("Kéo các thanh trượt bên dưới để chọn 2 vùng: **Vùng Mục tiêu** (nốt phổi, mạch máu) và **Vùng Nền** (mô mềm đồng nhất, không khí).")
+    
+    col_roi_img, col_roi_sliders = st.columns([1, 2])
+    
+    with col_roi_sliders:
+        st.write("🔴 **Vùng Mục tiêu (Target)** - Dùng để lấy Tín hiệu (Signal)")
+        t_x = st.slider("Target X", 0, 512, 200)
+        t_y = st.slider("Target Y", 0, 512, 250)
+        t_s = st.slider("Target Size", 5, 100, 20)
+        
+        st.write("🔵 **Vùng Nền (Background)** - Dùng để đo Nhiễu (Noise)")
+        b_x = st.slider("Bg X", 0, 512, 100)
+        b_y = st.slider("Bg Y", 0, 512, 250)
+        b_s = st.slider("Bg Size", 5, 100, 30)
+
+    roi_target = (t_x, t_y, t_s, t_s)
+    roi_bg = (b_x, b_y, b_s, b_s)
+
+    with st.spinner("Đang chạy inference trên 4 Variant..."):
+        abl_imgs = {}
+        with torch.no_grad():
+            abl_imgs["LDCT (Input)"] = to_numpy_hu(x_abl, dataset)
+            abl_imgs["NDCT (Ref)"]   = to_numpy_hu(torch.tensor(y_abl_np), dataset)
+            for vname, vmeta in VARIANT_META.items():
+                net = networks.get(vmeta["key"])
+                if net is not None:
+                    abl_imgs[vname] = to_numpy_hu(net(x_abl), dataset)
+                else:
+                    abl_imgs[vname] = None
+                    
+    with col_roi_img:
+        import matplotlib.patches as patches
+        fig_roi, ax_roi = plt.subplots(figsize=(4, 4))
+        ax_roi.imshow(window_image(abl_imgs["NDCT (Ref)"], abl_hu_min, abl_hu_max), cmap="gray")
+        
+        # Vẽ ROI Target (Đỏ)
+        rect_t = patches.Rectangle((t_x, t_y), t_s, t_s, linewidth=1.5, edgecolor='red', facecolor='none')
+        ax_roi.add_patch(rect_t)
+        
+        # Vẽ ROI Background (Xanh)
+        rect_b = patches.Rectangle((b_x, b_y), b_s, b_s, linewidth=1.5, edgecolor='blue', facecolor='none')
+        ax_roi.add_patch(rect_b)
+        
+        ax_roi.axis("off")
+        ax_roi.set_title("Bản đồ ROI trên NDCT")
+        st.pyplot(fig_roi, use_container_width=True)
+
+    img_ndct_abl = abl_imgs["NDCT (Ref)"]
+
+    # Compute metrics for each variant vs NDCT
+    abl_metrics = {}
+    for vname in VARIANT_META:
+        if abl_imgs[vname] is not None:
+            abl_metrics[vname] = calc_metrics(abl_imgs[vname], img_ndct_abl, roi_target, roi_bg)
+
+    # Find best value per metric
+    metric_keys = ["SSIM", "PSNR", "VIF", "Edge SSIM", "CNR", "HU Dev (Bg)"]
+    best_vals = {}
+    for mk in metric_keys:
+        vals = [abl_metrics[v][mk] for v in abl_metrics]
+        if not vals:
+            continue
+        if mk == "HU Dev (Bg)":
+            best_vals[mk] = min(vals) # HU dev nhỏ nhất là tốt nhất (ít nhiễu nhất)
+        else:
+            best_vals[mk] = max(vals)
+
+    # --- Display: LDCT | A | B | C | D | NDCT ---
+    col_labels = ["LDCT (Input)"] + list(VARIANT_META.keys()) + ["NDCT (Ref)"]
+    cols = st.columns(len(col_labels))
+
+    for col, label in zip(cols, col_labels):
+        with col:
+            img = abl_imgs.get(label)
+            if img is None:
+                st.markdown(f"**{label.split('—')[0].strip()}**")
+                st.info("⏳ Chưa có model")
+                continue
+
+            # Image
+            fig, ax = plt.subplots(figsize=(3, 3))
+            ax.imshow(window_image(img, abl_hu_min, abl_hu_max), cmap="gray")
+            ax.axis("off")
+            short = label.split("—")[0].strip() if "—" in label else label
+            ax.set_title(short, fontsize=9, pad=3)
+            plt.tight_layout(pad=0.2)
+            st.pyplot(fig, use_container_width=True)
+            plt.close(fig)
+
+            # Metrics
+            if label in abl_metrics:
+                m = abl_metrics[label]
+                for mk in metric_keys:
+                    val = m[mk]
+                    is_best = (best_vals.get(mk) is not None and abs(val - best_vals[mk]) < 1e-9)
+                    delta_str = " 🏆" if is_best else ""
+                    fmt = f"{val:.4f}" if mk != "PSNR" else f"{val:.2f} dB"
+                    st.markdown(f"<small>**{mk}:** {fmt}{delta_str}</small>", unsafe_allow_html=True)
+
+    # Metrics table
+    st.markdown("---")
+    st.subheader("📊 Bảng So sánh Metrics theo Lát cắt & ROI")
+    if abl_metrics:
+        rows = []
+        for vname, m in abl_metrics.items():
+            row = {"Biến thể": vname.split("—")[0].strip() + " " + (vname.split("—")[1].strip() if "—" in vname else "")}
+            for mk in metric_keys:
+                val = m[mk]
+                is_best = best_vals.get(mk) is not None and abs(val - best_vals[mk]) < 1e-9
+                row[mk] = f"{'⭐ ' if is_best else ''}{val:.4f}" if mk != "PSNR" else f"{'⭐ ' if is_best else ''}{val:.2f}"
+            rows.append(row)
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # Radar/bar chart
+    if abl_metrics:
+        st.subheader("📈 Biểu đồ So sánh Metrics")
+        fig_bar, axes = plt.subplots(2, 3, figsize=(14, 8))
+        axes = axes.flatten()
+        colors_list = [VARIANT_META[v]["color"] for v in abl_metrics]
+        v_labels = [v.split("—")[0].strip() for v in abl_metrics]
+        for ax, mk in zip(axes, metric_keys):
+            vals = [abl_metrics[v][mk] for v in abl_metrics]
+            bars = ax.bar(v_labels, vals, color=colors_list, width=0.6)
+            ax.set_title(mk, fontsize=11, fontweight="bold")
+            # Tự động set y limits để thấy rõ sự khác biệt
+            min_val = min(vals)
+            max_val = max(vals)
+            ax.set_ylim(min_val - (max_val - min_val)*0.1, max_val + (max_val - min_val)*0.1)
+            ax.tick_params(axis='x', labelsize=8, rotation=15)
+            ax.grid(axis='y', alpha=0.3)
+            # Highlight best
+            best_idx = vals.index(min(vals)) if mk == "HU Dev (Bg)" else vals.index(max(vals))
+            bars[best_idx].set_edgecolor("gold")
+            bars[best_idx].set_linewidth(3)
+        plt.tight_layout()
+        st.pyplot(fig_bar, use_container_width=True)
+        plt.close(fig_bar)
+
+    st.markdown("---")
 
 # ==========================================
 # TAB 1: SO SÁNH MÔ HÌNH (inference)
@@ -356,25 +414,17 @@ with tab_infer:
             pred_redcnn = networks["redcnn"](x_tensor)
             pred_edr = networks["edr_redcnn"](x_tensor)
 
-        def to_numpy_hu(tensor):
-            img_np = dataset.denormalize(tensor.cpu().squeeze()).numpy()
-            return dataset._convert_hu(img_np, to_hu=True)
-
-        img_ld = to_numpy_hu(x_tensor)
-        img_redcnn = to_numpy_hu(pred_redcnn)
-        img_edr = to_numpy_hu(pred_edr)
+        img_ld     = to_numpy_hu(x_tensor, dataset)
+        img_redcnn = to_numpy_hu(pred_redcnn, dataset)
+        img_edr    = to_numpy_hu(pred_edr, dataset)
 
         if target_available:
             if mode == "Dữ liệu mẫu (Mayo)":
-                img_ndct = to_numpy_hu(torch.tensor(y_raw))
+                img_ndct = to_numpy_hu(torch.tensor(y_raw), dataset)
             else:
                 img_ndct = y_raw
         else:
             img_ndct = None
-
-    def window_image(img, vmin, vmax):
-        img_clipped = np.clip(img, vmin, vmax)
-        return (img_clipped - vmin) / (vmax - vmin)
 
     # ==========================================
     # 5. UI LAYOUT & VISUALIZATION
@@ -385,50 +435,18 @@ with tab_infer:
         st.info("💡 Mẹo: Bạn có thể tải lên file NDCT (Đáp án) ở thanh bên trái để xem bảng so sánh chỉ số.")
 
     if target_available and img_ndct is not None:
-        import pandas as pd
-        from sewar.full_ref import vifp
-        from scipy import ndimage
-
-        def get_edge_map(img):
-            sx = ndimage.sobel(img, axis=0)
-            sy = ndimage.sobel(img, axis=1)
-            return np.hypot(sx, sy)
-
-        def calc_metrics(pred, target):
-            vmin, vmax = -1024.0, 3000.0
-            p = np.clip(pred, vmin, vmax)
-            t = np.clip(target, vmin, vmax)
-            p_norm = (p - vmin) / (vmax - vmin)
-            t_norm = (t - vmin) / (vmax - vmin)
-            ssim_val = metrics.structural_similarity(t_norm, p_norm, data_range=1.0)
-            psnr_val = metrics.peak_signal_noise_ratio(t_norm, p_norm, data_range=1.0)
-            vif_val = vifp(t_norm, p_norm)
-            edge_p = get_edge_map(p_norm)
-            edge_t = get_edge_map(t_norm)
-            ep_n = (edge_p - edge_p.min()) / (edge_p.max() - edge_p.min() + 1e-8)
-            et_n = (edge_t - edge_t.min()) / (edge_t.max() - edge_t.min() + 1e-8)
-            edge_ssim = metrics.structural_similarity(et_n, ep_n, data_range=1.0)
-            grad_rmse = np.sqrt(np.mean((edge_p - edge_t)**2))
-            hf_pres = np.sum(edge_p**2) / (np.sum(edge_t**2) + 1e-8)
-            return {
-                "SSIM": ssim_val, "PSNR": psnr_val, "VIF": vif_val,
-                "Edge SSIM (Chỉ số biên)": edge_ssim,
-                "Gradient RMSE (Sai số cạnh)": grad_rmse,
-                "HF Preservation (Giữ chi tiết)": hf_pres
-            }
-
         m_red = calc_metrics(img_redcnn, img_ndct)
         m_edr = calc_metrics(img_edr, img_ndct)
 
         st.markdown("#### 📊 So sánh Chỉ số lát cắt (Slice-level Comparison)")
         df_data = []
-        for k in m_red.keys():
+        for k in ["SSIM", "PSNR", "VIF", "Edge SSIM"]:
             diff = m_edr[k] - m_red[k]
             df_data.append({
                 "Chỉ số": k,
                 "RED-CNN (Baseline)": round(m_red[k], 4),
                 "EDR-REDNet (Ours)": round(m_edr[k], 4),
-                "Chênh lệch (Delta)": round(diff, 6)
+                "Δ (EDR − RED)": f"{'+' if diff>=0 else ''}{round(diff,4)}"
             })
         st.table(pd.DataFrame(df_data))
 
