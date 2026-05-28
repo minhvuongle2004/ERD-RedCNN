@@ -30,9 +30,9 @@ def safe_load_yaml(path: str):
 
 import ldctbench.evaluate.utils
 import ldctbench.utils
-ldctbench.evaluate.utils.torch.load = safe_load
-ldctbench.evaluate.utils.load_yaml = safe_load_yaml
-ldctbench.utils.load_yaml = safe_load_yaml
+ldctbench.evaluate.utils.torch.load = safe_load  # type: ignore
+ldctbench.evaluate.utils.load_yaml = safe_load_yaml  # type: ignore
+ldctbench.utils.load_yaml = safe_load_yaml  # type: ignore
 
 from ldctbench.data import TestData
 from ldctbench.evaluate import setup_trained_model
@@ -118,7 +118,7 @@ networks, device = load_networks()
 # 3. MAIN LAYOUT — TABS
 # ==========================================
 st.title("🔬 EDR-REDNet: Interactive Evaluation")
-tab_infer, tab_ablation = st.tabs(["🖼️ So sánh Mô hình", "🧪 Ablation Study"])
+tab_infer, tab_ablation, tab_paper = st.tabs(["🖼️ So sánh Mô hình", "🧪 Ablation Study", "📄 Paper Figures"])
 
 # ==========================================
 # TAB 2: ABLATION STUDY
@@ -506,3 +506,259 @@ with tab_infer:
                 ax.axis("off")
                 ax.set_title(title)
                 st.pyplot(fig, use_container_width=True)
+
+# ==========================================
+# TAB 3: PAPER FIGURES (Giai đoạn 4)
+# ==========================================
+with tab_paper:
+    st.header("📄 Paper Figures — Trực quan hóa cho Bài báo")
+    st.markdown("""
+    Tab này tổng hợp toàn bộ hình ảnh cần thiết cho bài báo khoa học:
+    - **Phần 1:** Boxplots phân bố chỉ số trên 9 bệnh nhân test
+    - **Phần 2:** So sánh Zoom vùng quan tâm (Mạch máu / Biên phổi)
+    - **Phần 3:** Export hình ảnh chất lượng cao
+    """)
+
+    # ── PHẦN 1: BOXPLOTS từ CSV ─────────────────────────────────────────────
+    st.markdown("---")
+    st.subheader("📦 Phần 1: Phân bố Chỉ số trên 9 Bệnh nhân (Boxplots)")
+    st.caption("Dữ liệu từ file: results/evaluation/per_patient_scores.csv")
+
+    csv_path = os.path.join("results", "evaluation", "per_patient_scores.csv")
+    pval_path = os.path.join("results", "evaluation", "wilcoxon_pvalues.csv")
+
+    if os.path.exists(csv_path):
+        df_scores = pd.read_csv(csv_path)
+
+        VARIANT_COLS = {
+            "A — RED-CNN\n(Baseline)": ("A_PSNR", "A_SSIM", "A_Edge_SSIM"),
+            "B — +EdgeBlock": ("B_PSNR", "B_SSIM", "B_Edge_SSIM"),
+            "C — +Sobel Input": ("C_PSNR", "C_SSIM", "C_Edge_SSIM"),
+            "D — EDR-REDNet\n(Ours)": ("D_PSNR", "D_SSIM", "D_Edge_SSIM"),
+        }
+        BOX_COLORS = ["#888888", "#4e9af1", "#f1a74e", "#2ecc71"]
+        METRIC_LABELS = ["PSNR (dB) ↑", "SSIM ↑", "Edge SSIM ↑"]
+
+        fig_box, axes_box = plt.subplots(1, 3, figsize=(14, 5))
+        fig_box.suptitle("Phân bố Chỉ số trên 9 Bệnh nhân Test Set",
+                         fontsize=13, fontweight="bold", y=1.02)
+
+        for ax, metric_idx, metric_label in zip(axes_box, range(3), METRIC_LABELS):
+            data_per_variant = []
+            labels = []
+            for vname, cols in VARIANT_COLS.items():
+                col = cols[metric_idx]
+                if col in df_scores.columns:
+                    data_per_variant.append(df_scores[col].dropna().values)
+                    labels.append(vname)
+
+            bp = ax.boxplot(data_per_variant, patch_artist=True, notch=False,
+                            medianprops={"color": "black", "linewidth": 2},
+                            whiskerprops={"linewidth": 1.2},
+                            capprops={"linewidth": 1.5})
+
+            for patch, color in zip(bp["boxes"], BOX_COLORS):
+                patch.set_facecolor(color)
+                patch.set_alpha(0.7)
+
+            ax.set_xticks(range(1, len(labels) + 1))
+            ax.set_xticklabels(labels, fontsize=8)
+            ax.set_title(metric_label, fontsize=11, fontweight="bold")
+            ax.grid(axis="y", alpha=0.3)
+            ax.set_xlabel("")
+
+            # Đánh dấu Variant D (last) với * nếu Edge SSIM
+            if metric_idx == 2:  # Edge SSIM — có p-value
+                ax.annotate("★ p=0.002", xy=(len(labels), max(data_per_variant[-1])),
+                            fontsize=9, color="#2ecc71", ha="center",
+                            xytext=(0, 8), textcoords="offset points",
+                            fontweight="bold")
+
+        plt.tight_layout()
+        st.pyplot(fig_box, use_container_width=True)
+
+        # Nút export boxplot
+        from io import BytesIO
+        buf_box = BytesIO()
+        fig_box.savefig(buf_box, format="png", dpi=300, bbox_inches="tight")
+        buf_box.seek(0)
+        st.download_button(
+            label="⬇️ Tải Boxplots (300 DPI PNG)",
+            data=buf_box,
+            file_name="fig_boxplots_9patients.png",
+            mime="image/png"
+        )
+        plt.close(fig_box)
+
+        # Hiển thị bảng p-value nếu có
+        if os.path.exists(pval_path):
+            st.markdown("**Kết quả Wilcoxon Signed-Rank Test (D vs A/B/C):**")
+            df_pval = pd.read_csv(pval_path)
+            st.dataframe(df_pval, use_container_width=True, hide_index=True)
+
+        # Hiển thị raw data dạng bảng
+        with st.expander("📋 Xem dữ liệu thô (Per-patient scores)"):
+            st.dataframe(df_scores.round(4), use_container_width=True, hide_index=True)
+    else:
+        st.warning("⚠️ Chưa có file results/evaluation/per_patient_scores.csv. Hãy chạy evaluate_statistical_test.py trước.")
+
+    # ── PHẦN 2: ZOOM VISUAL COMPARISON ──────────────────────────────────────
+    st.markdown("---")
+    st.subheader("🔎 Phần 2: So sánh Zoom Vùng Quan tâm")
+    st.caption("Phóng to một vùng nhỏ (mạch máu, biên phổi) để thấy rõ sự khác biệt biên giữa các variant.")
+
+    if len(dataset.samples) == 0:
+        st.info("ℹ️ Không có data Mayo test set trên máy này. Chức năng Zoom cần chạy trên máy có data.")
+    else:
+        col_z1, col_z2 = st.columns([1, 3])
+        with col_z1:
+            patient_names_z = [p["info"]["id"] for p in dataset.samples]
+            z_pat = st.selectbox("Bệnh nhân", range(len(patient_names_z)),
+                                  format_func=lambda i: patient_names_z[i], key="z_pat")
+            z_batch = dataset[z_pat]
+            n_sl_z = z_batch["info"]["n_slices"]
+            z_sl = st.slider("Lát cắt", 0, n_sl_z - 1, n_sl_z // 2, key="z_sl")
+
+        with col_z2:
+            st.markdown("**Vùng Zoom (trên ảnh 512×512):**")
+            zcol1, zcol2, zcol3 = st.columns(3)
+            with zcol1:
+                z_x = st.number_input("X (góc trên trái)", 0, 480, 180, step=10, key="zx")
+                z_y = st.number_input("Y (góc trên trái)", 0, 480, 220, step=10, key="zy")
+            with zcol2:
+                z_w = st.number_input("Chiều rộng", 20, 300, 120, step=10, key="zw")
+                z_h = st.number_input("Chiều cao", 20, 300, 120, step=10, key="zh")
+            with zcol3:
+                z_humin = st.number_input("HU Min", -1024, 0, -160, step=50, key="zhumin")
+                z_humax = st.number_input("HU Max", 0, 3000, 245, step=50, key="zhumax")
+
+        x_z = z_batch["x"][z_sl].unsqueeze(0).unsqueeze(0).to(device)
+        y_z_np = z_batch["y"][z_sl].numpy()
+
+        with st.spinner("Đang chạy inference cho Zoom..."):
+            zoom_imgs = {}
+            with torch.no_grad():
+                zoom_imgs["LDCT"] = to_numpy_hu(x_z, dataset)
+                zoom_imgs["A — Baseline"] = to_numpy_hu(networks["variant_a"](x_z), dataset)
+                if networks.get("variant_b") is not None:
+                    zoom_imgs["B — +EdgeBlock"] = to_numpy_hu(networks["variant_b"](x_z), dataset)
+                if networks.get("variant_c") is not None:
+                    zoom_imgs["C — +Sobel"] = to_numpy_hu(networks["variant_c"](x_z), dataset)
+                zoom_imgs["D — EDR-REDNet"] = to_numpy_hu(networks["variant_d"](x_z), dataset)
+                zoom_imgs["NDCT (GT)"] = to_numpy_hu(torch.tensor(y_z_np), dataset)
+
+        # Crop zoom region
+        x1, y1 = int(z_x), int(z_y)
+        x2, y2 = min(x1 + int(z_w), 512), min(y1 + int(z_h), 512)
+
+        st.markdown("#### 🖼️ Ảnh Toàn cục (với vùng Zoom được đánh dấu)")
+        import matplotlib.patches as mpatches
+        fig_full, ax_full = plt.subplots(1, len(zoom_imgs), figsize=(3 * len(zoom_imgs), 3.5))
+        if len(zoom_imgs) == 1:
+            ax_full = [ax_full]
+        for ax_f, (lbl, img_f) in zip(ax_full, zoom_imgs.items()):
+            ax_f.imshow(window_image(img_f, z_humin, z_humax), cmap="gray")
+            rect = mpatches.Rectangle((x1, y1), x2 - x1, y2 - y1,
+                                       linewidth=2, edgecolor="yellow", facecolor="none")
+            ax_f.add_patch(rect)
+            ax_f.set_title(lbl, fontsize=8, pad=3)
+            ax_f.axis("off")
+        plt.tight_layout(pad=0.5)
+        st.pyplot(fig_full, use_container_width=True)
+        plt.close(fig_full)
+
+        st.markdown("#### 🔬 Vùng Zoom")
+        zoom_cols = st.columns(len(zoom_imgs))
+        for col_z, (lbl, img_z) in zip(zoom_cols, zoom_imgs.items()):
+            crop = img_z[y1:y2, x1:x2]
+            with col_z:
+                fig_crop, ax_crop = plt.subplots(figsize=(2.5, 2.5))
+                ax_crop.imshow(window_image(crop, z_humin, z_humax), cmap="gray",
+                               interpolation="nearest")
+                ax_crop.axis("off")
+                ax_crop.set_title(lbl, fontsize=8, pad=3)
+                plt.tight_layout(pad=0.1)
+                st.pyplot(fig_crop, use_container_width=True)
+                plt.close(fig_crop)
+
+        # Difference Map (Zoom)
+        st.markdown("#### 🌡️ Difference Map (so với NDCT) — Vùng Zoom")
+        ndct_crop = zoom_imgs["NDCT (GT)"][y1:y2, x1:x2]
+        diff_keys = [k for k in zoom_imgs if k not in ["LDCT", "NDCT (GT)"]]
+        diff_cols2 = st.columns(len(diff_keys))
+        for col_d, k in zip(diff_cols2, diff_keys):
+            crop_d = zoom_imgs[k][y1:y2, x1:x2]
+            diff_d = crop_d - ndct_crop
+            with col_d:
+                fig_d, ax_d = plt.subplots(figsize=(2.5, 2.5))
+                im_d = ax_d.imshow(diff_d, cmap="seismic",
+                                    vmin=-200, vmax=200, interpolation="nearest")
+                ax_d.axis("off")
+                ax_d.set_title(f"Δ {k}", fontsize=8, pad=3)
+                plt.colorbar(im_d, ax=ax_d, fraction=0.046, pad=0.04)
+                plt.tight_layout(pad=0.1)
+                st.pyplot(fig_d, use_container_width=True)
+                plt.close(fig_d)
+
+        # Sobel Map (Zoom)
+        st.markdown("#### 📐 Sobel Edge Map — Vùng Zoom")
+        sobel_keys = ["LDCT"] + diff_keys + ["NDCT (GT)"]
+        sobel_cols = st.columns(len(sobel_keys))
+        for col_s, k in zip(sobel_cols, sobel_keys):
+            crop_s = zoom_imgs[k][y1:y2, x1:x2]
+            edge_s = filters.sobel(crop_s)
+            with col_s:
+                fig_s, ax_s = plt.subplots(figsize=(2.5, 2.5))
+                ax_s.imshow(edge_s, cmap="hot", interpolation="nearest")
+                ax_s.axis("off")
+                ax_s.set_title(f"Sobel: {k}", fontsize=8, pad=3)
+                plt.tight_layout(pad=0.1)
+                st.pyplot(fig_s, use_container_width=True)
+                plt.close(fig_s)
+
+        # Export Zoom Figure
+        st.markdown("---")
+        st.subheader("⬇️ Phần 3: Export Hình cho Bài báo")
+        if st.button("🖼️ Tạo Figure tổng hợp Paper-ready (Zoom + Diff + Sobel)"):
+            fig_paper, axes_paper = plt.subplots(3, len(zoom_imgs),
+                                                  figsize=(3 * len(zoom_imgs), 10))
+            row_labels = ["Ảnh gốc (Windowed)", "Difference Map (Δ vs NDCT)", "Sobel Edge Map"]
+            for col_i, (lbl, img_p) in enumerate(zoom_imgs.items()):
+                crop_p = img_p[y1:y2, x1:x2]
+                ndct_p = zoom_imgs["NDCT (GT)"][y1:y2, x1:x2]
+                # Row 1: Gray
+                axes_paper[0, col_i].imshow(window_image(crop_p, z_humin, z_humax),
+                                             cmap="gray", interpolation="nearest")
+                axes_paper[0, col_i].set_title(lbl, fontsize=9, fontweight="bold", pad=4)
+                # Row 2: Diff
+                diff_p = crop_p - ndct_p
+                im_p = axes_paper[1, col_i].imshow(diff_p, cmap="seismic",
+                                                     vmin=-200, vmax=200, interpolation="nearest")
+                # Row 3: Sobel
+                edge_p = filters.sobel(crop_p)
+                axes_paper[2, col_i].imshow(edge_p, cmap="hot", interpolation="nearest")
+                for row_i in range(3):
+                    axes_paper[row_i, col_i].axis("off")
+            for row_i, rl in enumerate(row_labels):
+                axes_paper[row_i, 0].set_ylabel(rl, fontsize=9, labelpad=5)
+                axes_paper[row_i, 0].axis("on")
+                axes_paper[row_i, 0].set_xticks([])
+                axes_paper[row_i, 0].set_yticks([])
+                for spine in axes_paper[row_i, 0].spines.values():
+                    spine.set_visible(False)
+            plt.suptitle(f"Patient {patient_names_z[z_pat]} — Slice {z_sl} — Zoom [{x1}:{x2}, {y1}:{y2}]",
+                          fontsize=10, y=1.01)
+            plt.tight_layout(pad=0.5)
+
+            buf_paper = BytesIO()
+            fig_paper.savefig(buf_paper, format="png", dpi=300, bbox_inches="tight")
+            buf_paper.seek(0)
+            st.download_button(
+                label="⬇️ Tải Figure tổng hợp (300 DPI)",
+                data=buf_paper,
+                file_name=f"fig_paper_{patient_names_z[z_pat]}_sl{z_sl}.png",
+                mime="image/png"
+            )
+            st.pyplot(fig_paper, use_container_width=True)
+            plt.close(fig_paper)
+            st.success("✅ Figure đã sẵn sàng! Click nút Tải ở trên để lưu về máy.")

@@ -1,0 +1,5 @@
+﻿Model,Parameters,Parameters (Human),MACs,MACs (Human),Inference Time (ms),Relative Params,Relative Time
+A (RED-CNN),1848865,1.85M,4.58397E+11,458.40G,2312.52,1,1
+B (No Sobel),2180641,2.18M,5.38708E+11,538.71G,2960.2,1.179,1.28
+C (No EdgeBlock),1849249,1.85M,4.58489E+11,458.49G,2768.47,1,1.197
+D (EDR-REDNet),2181025,2.18M,5.38801E+11,538.80G,3214.99,1.18,1.39

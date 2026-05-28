@@ -1,0 +1,4 @@
+﻿So sánh,PSNR,PSNR_sig,SSIM,SSIM_sig,Edge_SSIM,Edge_SSIM_sig
+D vs A,1,❌ p≥0.05 (không có ý nghĩa),1,❌ p≥0.05 (không có ý nghĩa),0.002,✅ p<0.05 (có ý nghĩa)
+D vs B,1,❌ p≥0.05 (không có ý nghĩa),0.875,❌ p≥0.05 (không có ý nghĩa),0.002,✅ p<0.05 (có ý nghĩa)
+D vs C,0.998,❌ p≥0.05 (không có ý nghĩa),1,❌ p≥0.05 (không có ý nghĩa),0.002,✅ p<0.05 (có ý nghĩa)
