@@ -7,6 +7,7 @@ METHODS = [
     "bilateral",
     "cnn10",
     "dugan",
+    "edrcnn10",
     "edrrednet",
     "qae",
     "redcnn",
